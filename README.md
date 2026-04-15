@@ -57,6 +57,7 @@ Video-Merger/
 - `video_processing.py`：负责视频信息探测、参数标准化、FFmpeg 绑定和拼接输出
 - `Video_Stitcher.spec`：PyInstaller 打包配置文件
 - `build_exe.ps1`：Windows 下的打包脚本
+- `Video_Stitcher_PRD.md`：项目需求文档，后续功能调整和迭代会持续同步更新
 - `README_DEV.md`：开发者维护文档
 
 ## 本地运行
@@ -133,4 +134,5 @@ dist\Video_Stitcher.exe
 
 - 当前项目主要面向 Windows 桌面环境
 - 如果打包时出现 `Spec file not found`，请确认当前终端位于仓库根目录
+- `Video_Stitcher_PRD.md` 是当前项目的需求文档，后续如果业务需求、功能范围或交互方案发生变化，会优先在该文档中更新
 - 更详细的维护规范和开发说明请查看 `README_DEV.md`
