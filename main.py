@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -34,16 +35,22 @@ from PyQt6.QtWidgets import (
 from video_processing import StitchConfig, VideoMeta, format_duration, probe_video, stitch_videos
 
 
-SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".flv"}
-PROJECT_OUTPUT_DIR = Path(r"D:\zll\前端\codex")
+SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".flv", ".ts"}
 
 
 class VideoTableWidget(QTableWidget):
     files_dropped = pyqtSignal(list)
+    blank_clicked = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
+
+    def mousePressEvent(self, event):
+        """Open the file picker when the empty table area is clicked."""
+        if event.button() == Qt.MouseButton.LeftButton and self.itemAt(event.position().toPoint()) is None:
+            self.blank_clicked.emit()
+        super().mousePressEvent(event)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -155,6 +162,31 @@ class OutputConfigDialog(QDialog):
         )
 
 
+class VideoProbeWorker(QThread):
+    """Probe video metadata in the background, including TS preparation."""
+
+    video_found = pyqtSignal(object)
+    progress_changed = pyqtSignal(int)
+    status_changed = pyqtSignal(str)
+    probe_failed = pyqtSignal(str, str)
+    completed = pyqtSignal()
+
+    def __init__(self, paths: list[str]):
+        super().__init__()
+        self.paths = paths
+
+    def run(self):
+        total = len(self.paths)
+        for index, path in enumerate(self.paths, start=1):
+            try:
+                self.status_changed.emit(f"正在读取视频信息 {index}/{total}: {Path(path).name}")
+                self.video_found.emit(probe_video(path))
+            except Exception as exc:
+                self.probe_failed.emit(path, str(exc))
+            self.progress_changed.emit(int(index / total * 100))
+        self.completed.emit()
+
+
 class StitchWorker(QThread):
     progress_changed = pyqtSignal(int)
     status_changed = pyqtSignal(str)
@@ -168,6 +200,7 @@ class StitchWorker(QThread):
         self.config = config
 
     def run(self):
+        """Run the stitching task in the worker thread and report failures."""
         try:
             stitch_videos(
                 input_paths=self.paths,
@@ -184,10 +217,15 @@ class StitchWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Video Stitcher - Phase 1")
+        self.setWindowTitle("Video Stitcher")
         self.resize(980, 640)
         self.video_items: list[VideoMeta] = []
+        self.probe_worker: VideoProbeWorker | None = None
         self.worker: StitchWorker | None = None
+        self.task_started_at: float | None = None
+        self.elapsed_timer = QTimer(self)
+        self.elapsed_timer.setInterval(1000)
+        self.elapsed_timer.timeout.connect(self._update_elapsed)
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -195,17 +233,21 @@ class MainWindow(QMainWindow):
 
         title = QLabel("AI 视频拼接工具（第一阶段）")
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        title.setText("AI 视频拼接工具")
         subtitle = QLabel("拖拽或添加视频，调整顺序后开始拼接。")
         subtitle.setStyleSheet("color: #666;")
 
         self.table = VideoTableWidget()
-        self.table.setColumnCount(4)
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["文件名", "时长", "分辨率", "FPS", "操作"])
         self.table.setHorizontalHeaderLabels(["文件名", "时长", "分辨率", "FPS"])
+        self.table.setHorizontalHeaderLabels(["文件名", "时长", "分辨率", "FPS", "操作"])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.files_dropped.connect(self.add_video_paths)
+        self.table.blank_clicked.connect(self.on_add_clicked)
 
         buttons_layout = QHBoxLayout()
         self.add_btn = QPushButton("添加视频")
@@ -214,13 +256,14 @@ class MainWindow(QMainWindow):
         self.down_btn = QPushButton("下移")
         buttons_layout.addWidget(self.add_btn)
         buttons_layout.addWidget(self.remove_btn)
+        self.clear_all_btn = QPushButton("全部清除")
+        buttons_layout.addWidget(self.clear_all_btn)
         buttons_layout.addWidget(self.up_btn)
         buttons_layout.addWidget(self.down_btn)
         buttons_layout.addStretch()
 
         output_layout = QHBoxLayout()
-        default_output_dir = PROJECT_OUTPUT_DIR if PROJECT_OUTPUT_DIR.exists() else Path.cwd()
-        self.output_edit = QLineEdit(str(default_output_dir / "output.mp4"))
+        self.output_edit = QLineEdit(str((Path.cwd() / "output.mp4").resolve()))
         self.output_btn = QPushButton("选择输出路径")
         output_layout.addWidget(QLabel("输出文件:"))
         output_layout.addWidget(self.output_edit)
@@ -232,6 +275,7 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.status_text = QLabel("等待开始")
+        self.elapsed_text = QLabel("处理耗时：00:00:00")
 
         root.addWidget(title)
         root.addWidget(subtitle)
@@ -241,6 +285,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self.start_btn)
         root.addWidget(self.progress)
         root.addWidget(self.status_text)
+        root.addWidget(self.elapsed_text)
 
         self.setStatusBar(QStatusBar())
 
@@ -250,19 +295,46 @@ class MainWindow(QMainWindow):
         self.down_btn.clicked.connect(self.on_move_down)
         self.output_btn.clicked.connect(self.on_pick_output)
         self.start_btn.clicked.connect(self.on_start)
+        self.clear_all_btn.clicked.connect(self.on_clear_all)
+
+    def _normalize_output_path(self, raw_path: str) -> str:
+        """Normalize user-provided output path without overriding directory choice."""
+        value = (raw_path or "").strip()
+        if not value:
+            path = Path.cwd() / "output.mp4"
+        else:
+            path = Path(value).expanduser()
+            if not path.suffix:
+                path = path.with_suffix(".mp4")
+            elif path.suffix.lower() != ".mp4":
+                path = path.with_suffix(".mp4")
+            if not path.is_absolute():
+                path = Path.cwd() / path
+        return os.path.normpath(str(path))
+
+    def _build_common_name_output_path(self, base_path: str) -> str:
+        """Build an MP4 path using the common left-to-right input filename prefix."""
+        if not self.video_items:
+            return self._normalize_output_path(base_path)
+        stems = [Path(item.path).stem for item in self.video_items]
+        common_prefix = os.path.commonprefix(stems).strip() or "merged"
+        base = Path(self._normalize_output_path(base_path))
+        return os.path.normpath(str(base.with_name(f"{common_prefix}.mp4")))
 
     def on_add_clicked(self):
+        """Open the video picker and add supported files to the queue."""
         files, _ = QFileDialog.getOpenFileNames(
             self,
             "选择视频文件",
             "",
-            "Video Files (*.mp4 *.mov *.avi *.mkv *.flv)",
+            "Video Files (*.mp4 *.mov *.avi *.mkv *.flv *.ts)",
         )
         self.add_video_paths(files)
 
     def add_video_paths(self, paths: list[str]):
+        """Queue supported files for background metadata probing."""
         existing = {os.path.normcase(item.path) for item in self.video_items}
-        added = 0
+        pending = []
         for path in paths:
             suffix = Path(path).suffix.lower()
             if suffix not in SUPPORTED_EXTENSIONS:
@@ -270,16 +342,36 @@ class MainWindow(QMainWindow):
             normalized = os.path.normcase(path)
             if normalized in existing:
                 continue
-            try:
-                meta = probe_video(path)
-            except Exception as exc:
-                QMessageBox.warning(self, "读取失败", f"无法读取视频:\n{path}\n\n{exc}")
-                continue
-            self.video_items.append(meta)
             existing.add(normalized)
-            added += 1
-        if added:
-            self.refresh_table()
+            pending.append(path)
+        if not pending:
+            return
+
+        self._set_ui_busy(True)
+        self.progress.setValue(0)
+        self.status_text.setText("准备读取视频信息...")
+        self.probe_worker = VideoProbeWorker(pending)
+        self.probe_worker.video_found.connect(self._on_video_found)
+        self.probe_worker.progress_changed.connect(self.progress.setValue)
+        self.probe_worker.status_changed.connect(self.status_text.setText)
+        self.probe_worker.probe_failed.connect(self._on_probe_failed)
+        self.probe_worker.completed.connect(self._on_probe_completed)
+        self.probe_worker.start()
+
+    def _on_video_found(self, meta: VideoMeta):
+        """Append one successfully probed video while preserving input order."""
+        self.video_items.append(meta)
+        self.refresh_table()
+
+    def _on_probe_failed(self, path: str, message: str):
+        """Report a metadata probe failure without aborting other queued files."""
+        QMessageBox.warning(self, "读取失败", f"无法读取视频:\n{path}\n\n{message}")
+
+    def _on_probe_completed(self):
+        """Restore controls after background metadata probing completes."""
+        self._set_ui_busy(False)
+        self.progress.setValue(0)
+        self.status_text.setText("视频信息读取完成。" if self.video_items else "等待开始")
 
     def on_remove_clicked(self):
         row = self.table.currentRow()
@@ -287,6 +379,21 @@ class MainWindow(QMainWindow):
             return
         self.video_items.pop(row)
         self.refresh_table()
+
+    def on_clear_item(self, path: str):
+        """Remove one queued video identified by its original path."""
+        target = os.path.normcase(path)
+        self.video_items = [
+            item for item in self.video_items if os.path.normcase(item.path) != target
+        ]
+        self.refresh_table()
+
+    def on_clear_all(self):
+        """Remove all queued videos and reset the table."""
+        self.video_items.clear()
+        self.output_edit.clear()
+        self.refresh_table()
+        self.status_text.setText("等待开始")
 
     def on_move_up(self):
         row = self.table.currentRow()
@@ -303,18 +410,15 @@ class MainWindow(QMainWindow):
         self.refresh_table(selected=row + 1)
 
     def on_pick_output(self):
-        default_output_dir = PROJECT_OUTPUT_DIR if PROJECT_OUTPUT_DIR.exists() else Path.cwd()
+        initial_path = self._normalize_output_path(self.output_edit.text())
         output, _ = QFileDialog.getSaveFileName(
             self,
             "选择输出文件",
-            self.output_edit.text().strip() or str(default_output_dir / "output.mp4"),
+            initial_path,
             "MP4 Files (*.mp4)",
         )
         if output:
-            if not output.lower().endswith(".mp4"):
-                output += ".mp4"
-            output = str((default_output_dir / Path(output).name).resolve())
-            self.output_edit.setText(output)
+            self.output_edit.setText(self._build_common_name_output_path(output))
 
     def refresh_table(self, selected: int | None = None):
         self.table.setRowCount(len(self.video_items))
@@ -323,6 +427,11 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 1, QTableWidgetItem(format_duration(item.duration)))
             self.table.setItem(row, 2, QTableWidgetItem(f"{item.width}x{item.height}"))
             self.table.setItem(row, 3, QTableWidgetItem(f"{item.fps:.2f}"))
+            clear_button = QPushButton("清除")
+            clear_button.clicked.connect(
+                lambda checked=False, path=item.path: self.on_clear_item(path)
+            )
+            self.table.setCellWidget(row, 4, clear_button)
         if selected is not None and 0 <= selected < len(self.video_items):
             self.table.selectRow(selected)
 
@@ -339,6 +448,7 @@ class MainWindow(QMainWindow):
                 target_height=first.height,
                 target_fps=float(first.fps),
                 normalize=False,
+                input_durations=tuple(item.duration for item in self.video_items),
             )
 
         dialog = OutputConfigDialog(self.video_items, self)
@@ -351,11 +461,13 @@ class MainWindow(QMainWindow):
             target_height=decision.target_height,
             target_fps=decision.target_fps,
             normalize=decision.normalize,
+            input_durations=tuple(item.duration for item in self.video_items),
         )
 
     def _set_ui_busy(self, busy: bool):
         self.add_btn.setEnabled(not busy)
         self.remove_btn.setEnabled(not busy)
+        self.clear_all_btn.setEnabled(not busy)
         self.up_btn.setEnabled(not busy)
         self.down_btn.setEnabled(not busy)
         self.output_btn.setEnabled(not busy)
@@ -363,6 +475,10 @@ class MainWindow(QMainWindow):
         self.table.setEnabled(not busy)
 
     def on_start(self):
+        """Validate the current task, start the worker, and begin elapsed-time display."""
+        if not self.video_items:
+            self.status_text.setText("请先添加视频文件")
+            return
         if not self.video_items:
             QMessageBox.information(self, "提示", "请至少添加一个视频文件。")
             return
@@ -370,8 +486,7 @@ class MainWindow(QMainWindow):
         if not output_path:
             QMessageBox.warning(self, "提示", "请先设置输出路径。")
             return
-        output_dir = PROJECT_OUTPUT_DIR if PROJECT_OUTPUT_DIR.exists() else Path.cwd()
-        output_path = str((output_dir / Path(output_path).name).resolve())
+        output_path = self._build_common_name_output_path(output_path)
         self.output_edit.setText(output_path)
 
         try:
@@ -382,6 +497,9 @@ class MainWindow(QMainWindow):
 
         self.progress.setValue(0)
         self.status_text.setText("准备开始处理...")
+        self.task_started_at = time.monotonic()
+        self.elapsed_text.setText("已耗时：00:00:00")
+        self.elapsed_timer.start()
         self._set_ui_busy(True)
 
         paths = [item.path for item in self.video_items]
@@ -393,15 +511,36 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
     def on_worker_failed(self, message: str):
+        """Restore the UI after a failed task while preserving elapsed time."""
+        self._stop_elapsed_timer("处理失败。")
         self._set_ui_busy(False)
-        self.status_text.setText("处理失败。")
         QMessageBox.critical(self, "处理失败", message)
 
     def on_worker_completed(self, output_path: str):
+        """Restore the UI after success and show the total elapsed time."""
+        self._stop_elapsed_timer("处理完成。")
         self._set_ui_busy(False)
-        self.status_text.setText("处理完成。")
         self.progress.setValue(100)
+        self.video_items.clear()
+        self.output_edit.clear()
+        self.refresh_table()
         QMessageBox.information(self, "完成", f"视频已输出到:\n{output_path}")
+
+    def _update_elapsed(self):
+        """Refresh the elapsed-time label using a monotonic task start time."""
+        if self.task_started_at is None:
+            return
+        elapsed = max(0, int(time.monotonic() - self.task_started_at))
+        self.elapsed_text.setText(f"已耗时：{format_duration(elapsed)}")
+
+    def _stop_elapsed_timer(self, status: str):
+        """Stop elapsed-time updates and display the final task duration."""
+        self.elapsed_timer.stop()
+        self._update_elapsed()
+        if self.task_started_at is not None:
+            elapsed = max(0, int(time.monotonic() - self.task_started_at))
+            self.elapsed_text.setText(f"处理耗时：{format_duration(elapsed)}")
+        self.status_text.setText(status)
 
 
 def main():
