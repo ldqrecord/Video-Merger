@@ -7,10 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from moviepy.config import change_settings
-from moviepy.editor import VideoFileClip, concatenate_videoclips
-from proglog import ProgressBarLogger
-
 try:
     from imageio_ffmpeg import get_ffmpeg_executable as _get_ffmpeg_path
 except ImportError:
@@ -19,15 +15,21 @@ except ImportError:
 
 
 def _configure_ffmpeg_runtime() -> str:
-    """Point MoviePy to the bundled imageio-ffmpeg binary."""
+    """Locate the bundled FFmpeg binary without importing MoviePy."""
     ffmpeg_path = _get_ffmpeg_path()
     os.environ["IMAGEIO_FFMPEG_EXE"] = ffmpeg_path
-    change_settings({"FFMPEG_BINARY": ffmpeg_path})
     return ffmpeg_path
 
 
 FFMPEG_RUNTIME_PATH = _configure_ffmpeg_runtime()
 TS_CONVERSION_TIMEOUT_SECONDS = 1800
+
+
+def _configure_moviepy_runtime() -> None:
+    """Configure MoviePy only when a MoviePy operation is actually needed."""
+    from moviepy.config import change_settings
+
+    change_settings({"FFMPEG_BINARY": FFMPEG_RUNTIME_PATH})
 
 
 @dataclass
@@ -52,6 +54,9 @@ class StitchConfig:
 
 def _probe_clip(path: str, source_path: str) -> VideoMeta:
     """Read metadata from an already prepared video file."""
+    _configure_moviepy_runtime()
+    from moviepy.editor import VideoFileClip
+
     clip = VideoFileClip(path)
     try:
         return VideoMeta(
@@ -181,28 +186,26 @@ def probe_video(path: str) -> VideoMeta:
         return _probe_clip(converted_path, path)
 
 
-class _QtProgressLogger(ProgressBarLogger):
-    def __init__(
-        self,
-        on_progress: Callable[[int], None],
-        start: int = 40,
-        span: int = 60,
-    ) -> None:
-        super().__init__()
-        self._on_progress = on_progress
-        self._start = start
-        self._span = span
+def _create_progress_logger(
+    on_progress: Callable[[int], None],
+    start: int = 40,
+    span: int = 60,
+):
+    """Create the MoviePy progress logger lazily for the re-encoding path."""
+    from proglog import ProgressBarLogger
 
-    def bars_callback(self, bar, attr, value, old_value=None):
-        super().bars_callback(bar, attr, value, old_value)
-        if bar != "t" or attr != "index":
-            return
-        total = self.bars.get("t", {}).get("total", 0)
-        if not total:
-            return
-        ratio = max(0.0, min(float(value) / float(total), 1.0))
-        progress = self._start + int(ratio * self._span)
-        self._on_progress(progress)
+    class QtProgressLogger(ProgressBarLogger):
+        def bars_callback(self, bar, attr, value, old_value=None):
+            super().bars_callback(bar, attr, value, old_value)
+            if bar != "t" or attr != "index":
+                return
+            total = self.bars.get("t", {}).get("total", 0)
+            if not total:
+                return
+            ratio = max(0.0, min(float(value) / float(total), 1.0))
+            on_progress(start + int(ratio * span))
+
+    return QtProgressLogger()
 
 
 def _concat_copy_inputs(
@@ -359,6 +362,9 @@ def stitch_videos(
                 return
 
         try:
+            _configure_moviepy_runtime()
+            from moviepy.editor import VideoFileClip, concatenate_videoclips
+
             for index, path in enumerate(prepared_paths, start=1):
                 on_status(f"正在读取片段 {index}/{total}: {Path(input_paths[index - 1]).name}")
                 base_clip = VideoFileClip(path)
@@ -385,7 +391,7 @@ def stitch_videos(
 
             on_status("正在合并视频片段...")
             final_clip = concatenate_videoclips(prepared_clips, method="compose")
-            logger = _QtProgressLogger(on_progress=on_progress, start=40, span=60)
+            logger = _create_progress_logger(on_progress=on_progress, start=40, span=60)
             final_clip.write_videofile(
                 output_path,
             codec="libx264",

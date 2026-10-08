@@ -217,8 +217,17 @@ class StitchWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
         self.setWindowTitle("Video Stitcher")
         self.resize(980, 640)
+        self._center_window()
         self.video_items: list[VideoMeta] = []
         self.probe_worker: VideoProbeWorker | None = None
         self.worker: StitchWorker | None = None
@@ -296,6 +305,16 @@ class MainWindow(QMainWindow):
         self.output_btn.clicked.connect(self.on_pick_output)
         self.start_btn.clicked.connect(self.on_start)
         self.clear_all_btn.clicked.connect(self.on_clear_all)
+
+    def _center_window(self) -> None:
+        """Center the main window within the available screen geometry."""
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        frame = self.frameGeometry()
+        frame.moveCenter(available.center())
+        self.move(frame.topLeft())
 
     def _normalize_output_path(self, raw_path: str) -> str:
         """Normalize user-provided output path without overriding directory choice."""

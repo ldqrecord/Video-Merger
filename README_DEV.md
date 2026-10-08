@@ -3,8 +3,8 @@
 
 ## 鐗堟湰淇℃伅
 
-- 褰撳墠鐗堟湰锛歚1.0.1`
-- 涓婁竴鐗堟湰锛歚1.0.0`
+- 褰撳墠鐗堟湰锛歚1.0.2`
+- 涓婁竴鐗堟湰锛歚1.0.1`
 
 Video Stitcher 鏄竴涓熀浜?Python + PyQt6 鐨勬闈㈣棰戞嫾鎺ュ伐鍏凤紝闈㈠悜鈥滈浂閰嶇疆銆佸弻鍑诲嵆鐢ㄢ€濈殑 Windows 浣跨敤鍦烘櫙銆傜敤鎴峰彲浠ラ€氳繃鎷栨嫿瀵煎叆澶氱鏍煎紡瑙嗛锛圡P4/MOV/AVI/MKV/FLV/TS锛夛紝鍦ㄥ彲瑙嗗寲鍒楄〃涓皟鏁撮『搴忓悗涓€閿悎骞惰緭鍑恒€傞」鐩唴缃櫤鑳藉弬鏁版娴嬶細褰撳垎杈ㄧ巼鎴栧抚鐜囦笉涓€鑷存椂锛屼細鎻愮ず宸紓骞舵敮鎸佹寜 1080p30銆侀瑙嗛鍙傛暟鎴栬嚜瀹氫箟鍙傛暟缁熶竴杞爜锛岃嚜鍔ㄥ畬鎴愮瓑姣旂缉鏀句笌榛戣竟濉厖锛屾渶缁堣緭鍑烘爣鍑?MP4 鏂囦欢銆傛牳蹇冨鐞嗗湪鍚庡彴绾跨▼鎵ц锛屼繚璇佹嫾鎺ヨ繃绋嬩腑鐣岄潰涓嶅崱椤匡紱褰撳墠浠ｇ爜宸插疄鐜颁换鍔¤€楁椂鏄剧ず鍜?TS 杞复鏃?MP4锛屽緟鍚庣画瀹屾垚鎵撳寘楠岃瘉鍚庡啀杩唬鐗堟湰鍙枫€傚悓鏃堕€氳繃 PyInstaller onefile 鎵撳寘骞堕泦鎴?FFmpeg锛坕mageio-ffmpeg锛夛紝瀹炵幇鏃犻澶栫幆澧冧緷璧栫殑鍒嗗彂涓庤繍琛屻€?
 ## 1. 椤圭洰缁撴瀯璇存槑
@@ -180,3 +180,50 @@ python -m PyInstaller --noconfirm --clean .\Video_Stitcher.spec
 - 点击“全部清除”后同步清空输出路径。
 - 空队列点击“开始拼接”直接返回，不显示弹窗。
 - 主窗口标题使用 `Video Stitcher`，界面标题不再显示“第一阶段”。
+
+## 10. 启动性能优化记录
+
+### 10.1 v1.0.2 onefile 优化验证（2026-10-08）
+
+- MoviePy 和 proglog 改为按需导入，快速 FFmpeg 拼接路径不会在 GUI 启动时加载 MoviePy。
+- `.spec` 从全量收集 MoviePy/imageio-ffmpeg 子模块改为最小显式 hidden imports。
+- 排除当前处理链路不需要的可选库：`av`、`cv2`、`matplotlib`、`numba`、`pandas`、`pyarrow`、`scipy`、`skimage`。
+- 优化包：`dist\Video_Stitcher_1.0.2.exe`。
+- 包体积由约 `277.9 MB` 降至约 `93.0 MB`，PYZ 由约 `18.5 MB` 降至约 `6.1 MB`。
+- 导入检查确认 `video_processing` 加载时未导入 MoviePy，FFmpeg 路径仍能正常解析。
+- 优化进程能够显示 `Video Stitcher` 窗口；本机 onefile 首次解包仍可能超过 60 秒，推断与系统临时目录安全扫描和磁盘 I/O 有关。
+- 当前优化包已作为 `v1.0.2` 测试发布产物，未覆盖历史 `Video_Stitcher_1.0.1.exe`。
+
+### 10.2 维护要求
+
+- 每次修改 `.spec` 后，必须验证 GUI 启动、同参数 MP4 快速拼接、参数不一致视频的 MoviePy 回退转码。
+- 发布前分别记录首次启动、第二次启动和 onedir 对照耗时。
+- 若 onefile 启动仍不满足要求，优先评估 onedir 或安装包分发，不要继续盲目增加 hidden imports。
+
+### 10.4 onedir 打包方式
+
+- spec 文件：`Video_Stitcher_1.0.1_optimized_onedir.spec`
+- 打包命令：
+
+```powershell
+python -m PyInstaller --noconfirm --clean .\Video_Stitcher_1.0.1_optimized_onedir.spec
+```
+
+- 输出目录：`dist\Video_Stitcher_1.0.2_onedir\`
+- 启动文件：`Video_Stitcher_1.0.2_onedir.exe`
+- onedir 使用与优化 onefile 相同的源码、MoviePy 延迟导入、FFmpeg 资源和依赖排除规则。
+- onedir 不能只复制 EXE，必须整体分发目录及其 `_internal`/依赖文件。
+- 2026-10-08 本机首次启动约 `1.72 秒`，目录总大小约 `242 MB`。
+
+### 10.3 窗口显示回归
+
+- `MainWindow` 必须显式使用标准窗口标志，确保标题栏、最小化、最大化和关闭按钮存在。
+- 启动时应使用屏幕可用区域居中窗口，避免打包后窗口贴在屏幕顶部。
+- 打包版必须执行 `TEST_CASES.md` 的 `TC-020`。
+
+- `2026-10-08` `v1.0.1`
+  - 修复打包后窗口缺少标题栏和关闭按钮的问题。
+  - 增加窗口启动居中逻辑。
+- `2026-10-08` `v1.0.2`
+  - 将启动性能优化、标准窗口修复和 onedir 分发方案正式纳入版本。
+  - 更新 onefile 和 onedir 产物名称。
